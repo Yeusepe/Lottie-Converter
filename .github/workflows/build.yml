@@ -52,28 +52,65 @@ jobs:
       run: dotnet --info
     
     - name: Restore dependencies
-      run: dotnet restore LottieConverter.csproj /p:Platform=${{ matrix.platform }} /p:PublishProfile= /p:PublishReadyToRun=false /p:PublishTrimmed=false
+      run: dotnet restore LottieConverter.csproj -r ${{ matrix.runtime_id }} /p:Platform=${{ matrix.platform }} /p:PublishProfile= /p:PublishReadyToRun=false /p:PublishTrimmed=false
     
     - name: Build project
       run: dotnet build LottieConverter.csproj --configuration ${{ matrix.configuration }} /p:Platform=${{ matrix.platform }} /p:PublishProfile= /p:PublishReadyToRun=false /p:PublishTrimmed=false --no-restore -v minimal
     
-    - name: Publish application
+    - name: Generate signing certificate (CI)
       if: matrix.configuration == 'Release'
-      run: dotnet publish LottieConverter.csproj --configuration Release /p:Platform=${{ matrix.platform }} /p:PublishProfile= /p:PublishReadyToRun=false /p:PublishTrimmed=false --runtime ${{ matrix.runtime_id }} --self-contained false --no-build -o publish/${{ matrix.runtime_id }} -v minimal
-
-    - name: Package publish output (zip)
-      if: matrix.configuration == 'Release'
+      shell: pwsh
       run: |
-        New-Item -ItemType Directory -Force -Path artifacts | Out-Null
-        Compress-Archive -Path "publish/${{ matrix.runtime_id }}/*" -DestinationPath "artifacts/LottieConverter-${{ matrix.runtime_id }}.zip" -Force
-    
+        $password = [System.Guid]::NewGuid().ToString("N")
+        "MSIX_CERT_PASSWORD=$password" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+        $pwd = ConvertTo-SecureString -String $password -AsPlainText -Force
+        $cert = New-SelfSignedCertificate -Type Custom `
+          -Subject "CN=LottieConverter (CI)" `
+          -KeyUsage DigitalSignature `
+          -FriendlyName "LottieConverter (CI)" `
+          -CertStoreLocation "Cert:\CurrentUser\My" `
+          -HashAlgorithm sha256 `
+          -KeyLength 2048 `
+          -KeyExportPolicy Exportable
+
+        Export-PfxCertificate -Cert $cert -FilePath "msix-signing.pfx" -Password $pwd | Out-Null
+        Export-Certificate -Cert $cert -FilePath "msix-signing.cer" | Out-Null
+
+    - name: Build MSIX installer
+      if: matrix.configuration == 'Release'
+      shell: pwsh
+      run: |
+        New-Item -ItemType Directory -Force -Path "artifacts/${{ matrix.runtime_id }}" | Out-Null
+
+        # Build a sideloadable MSIX/MSIXBUNDLE signed with the CI cert.
+        dotnet publish LottieConverter.csproj `
+          --configuration Release `
+          /p:Platform=${{ matrix.platform }} `
+          /p:RuntimeIdentifier=${{ matrix.runtime_id }} `
+          /p:PublishProfile= `
+          /p:PublishReadyToRun=false `
+          /p:PublishTrimmed=false `
+          /p:GenerateAppxPackageOnBuild=true `
+          /p:UapAppxPackageBuildMode=SideloadOnly `
+          /p:AppxBundle=Always `
+          /p:AppxBundlePlatforms=${{ matrix.platform }} `
+          /p:AppxPackageDir="artifacts\\${{ matrix.runtime_id }}\\" `
+          /p:AppxPackageSigningEnabled=true `
+          /p:PackageCertificateKeyFile="msix-signing.pfx" `
+          /p:PackageCertificatePassword="$env:MSIX_CERT_PASSWORD"
+
+        Copy-Item -Force "msix-signing.cer" "artifacts/${{ matrix.runtime_id }}/msix-signing.cer"
+
     - name: Upload build artifacts
       if: matrix.configuration == 'Release'
       uses: actions/upload-artifact@v4
       with:
         name: LottieConverter-${{ matrix.configuration }}-${{ matrix.platform }}
         path: |
-          artifacts/LottieConverter-${{ matrix.runtime_id }}.zip
+          artifacts/${{ matrix.runtime_id }}/**/*.msix*
+          artifacts/${{ matrix.runtime_id }}/**/*.appinstaller
+          artifacts/${{ matrix.runtime_id }}/msix-signing.cer
         retention-days: 30
         if-no-files-found: warn
 
@@ -95,4 +132,6 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            **/*.zip
+            **/*.msix*
+            **/*.appinstaller
+            **/*.cer
