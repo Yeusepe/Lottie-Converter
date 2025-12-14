@@ -13,22 +13,13 @@ env:
 
 jobs:
   build:
-    name: Build (${{ matrix.configuration }}, ${{ matrix.platform }})
+    name: Build (Release, ${{ matrix.platform }})
     runs-on: windows-2022
     
     strategy:
       fail-fast: false
       matrix:
         include:
-          - configuration: Debug
-            platform: x64
-            runtime_id: win-x64
-          - configuration: Debug
-            platform: x86
-            runtime_id: win-x86
-          - configuration: Debug
-            platform: ARM64
-            runtime_id: win-arm64
           - configuration: Release
             platform: x64
             runtime_id: win-x64
@@ -54,31 +45,30 @@ jobs:
     - name: Restore dependencies
       run: dotnet restore LottieConverter.csproj -r ${{ matrix.runtime_id }} /p:Platform=${{ matrix.platform }} /p:PublishProfile= /p:PublishReadyToRun=false /p:PublishTrimmed=false
     
-    - name: Build project
-      run: dotnet build LottieConverter.csproj --configuration ${{ matrix.configuration }} /p:Platform=${{ matrix.platform }} /p:PublishProfile= /p:PublishReadyToRun=false /p:PublishTrimmed=false --no-restore -v minimal
-    
     - name: Generate signing certificate (CI)
-      if: matrix.configuration == 'Release'
       shell: pwsh
       run: |
         $password = [System.Guid]::NewGuid().ToString("N")
         "MSIX_CERT_PASSWORD=$password" | Out-File -FilePath $env:GITHUB_ENV -Append
 
         $pwd = ConvertTo-SecureString -String $password -AsPlainText -Force
-        $cert = New-SelfSignedCertificate -Type Custom `
-          -Subject "CN=LottieConverter (CI)" `
-          -KeyUsage DigitalSignature `
+        # The cert subject must match Package.appxmanifest's <Identity Publisher="...">.
+        $manifestText = Get-Content -Raw "Package.appxmanifest"
+        if ($manifestText -notmatch 'Publisher=\"([^\"]+)\"') {
+          throw "Could not determine manifest Publisher from Package.appxmanifest"
+        }
+        $publisher = $Matches[1]
+        $cert = New-SelfSignedCertificate -Type CodeSigningCert `
+          -Subject $publisher `
           -FriendlyName "LottieConverter (CI)" `
           -CertStoreLocation "Cert:\CurrentUser\My" `
           -HashAlgorithm sha256 `
-          -KeyLength 2048 `
           -KeyExportPolicy Exportable
 
         Export-PfxCertificate -Cert $cert -FilePath "msix-signing.pfx" -Password $pwd | Out-Null
         Export-Certificate -Cert $cert -FilePath "msix-signing.cer" | Out-Null
 
     - name: Build MSIX installer
-      if: matrix.configuration == 'Release'
       shell: pwsh
       run: |
         New-Item -ItemType Directory -Force -Path "artifacts/${{ matrix.runtime_id }}" | Out-Null
@@ -96,6 +86,7 @@ jobs:
           /p:AppxBundle=Always `
           /p:AppxBundlePlatforms=${{ matrix.platform }} `
           /p:AppxPackageDir="artifacts\\${{ matrix.runtime_id }}\\" `
+          /p:AppxSymbolPackageEnabled=false `
           /p:AppxPackageSigningEnabled=true `
           /p:PackageCertificateKeyFile="msix-signing.pfx" `
           /p:PackageCertificatePassword="$env:MSIX_CERT_PASSWORD"
@@ -103,10 +94,9 @@ jobs:
         Copy-Item -Force "msix-signing.cer" "artifacts/${{ matrix.runtime_id }}/msix-signing.cer"
 
     - name: Upload build artifacts
-      if: matrix.configuration == 'Release'
       uses: actions/upload-artifact@v4
       with:
-        name: LottieConverter-${{ matrix.configuration }}-${{ matrix.platform }}
+        name: LottieConverter-Release-${{ matrix.platform }}
         path: |
           artifacts/${{ matrix.runtime_id }}/**/*.msix*
           artifacts/${{ matrix.runtime_id }}/**/*.appinstaller
