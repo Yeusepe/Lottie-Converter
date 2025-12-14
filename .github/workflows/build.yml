@@ -12,8 +12,71 @@ env:
   DOTNET_VERSION: '8.0.x'
 
 jobs:
+  tag:
+    name: Create tag from app version
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Read version from Package.appxmanifest
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import xml.etree.ElementTree as ET
+
+          path = "Package.appxmanifest"
+          with open(path, "rb") as f:
+              data = f.read()
+          if data.startswith(b"\xef\xbb\xbf"):
+              data = data[3:]
+
+          root = ET.fromstring(data)
+          identity = None
+          for el in root.iter():
+              if el.tag.endswith("Identity"):
+                  identity = el
+                  break
+          if identity is None:
+              raise SystemExit("Could not find <Identity> in Package.appxmanifest")
+
+          version = identity.attrib.get("Version")
+          if not version:
+              raise SystemExit("Package.appxmanifest <Identity> has no Version attribute")
+
+          tag = f"v{version}"
+          print(f"version={version}")
+          print(f"tag={tag}")
+          PY
+
+      - name: Create and push tag (if missing)
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --tags --force
+
+          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            echo "Tag already exists: $TAG"
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag "$TAG"
+          git push origin "$TAG"
+
   build:
     name: Build (Release, ${{ matrix.platform }})
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
     runs-on: windows-2022
     
     strategy:
@@ -46,6 +109,7 @@ jobs:
       run: dotnet restore LottieConverter.csproj -r ${{ matrix.runtime_id }} /p:Platform=${{ matrix.platform }} /p:PublishProfile= /p:PublishReadyToRun=false /p:PublishTrimmed=false
     
     - name: Generate signing certificate (CI)
+      if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
       shell: pwsh
       run: |
         $password = [System.Guid]::NewGuid().ToString("N")
@@ -69,6 +133,7 @@ jobs:
         Export-Certificate -Cert $cert -FilePath "msix-signing.cer" | Out-Null
 
     - name: Build MSIX installer
+      if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
       shell: pwsh
       run: |
         New-Item -ItemType Directory -Force -Path "artifacts/${{ matrix.runtime_id }}" | Out-Null
@@ -94,6 +159,7 @@ jobs:
         Copy-Item -Force "msix-signing.cer" "artifacts/${{ matrix.runtime_id }}/msix-signing.cer"
 
     - name: Upload build artifacts
+      if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
       uses: actions/upload-artifact@v4
       with:
         name: LottieConverter-Release-${{ matrix.platform }}
@@ -103,6 +169,10 @@ jobs:
           artifacts/${{ matrix.runtime_id }}/msix-signing.cer
         retention-days: 30
         if-no-files-found: warn
+
+    - name: Build project (no MSIX)
+      if: github.event_name == 'pull_request'
+      run: dotnet build LottieConverter.csproj --configuration Release /p:Platform=${{ matrix.platform }} /p:PublishProfile= /p:PublishReadyToRun=false /p:PublishTrimmed=false --no-restore -v minimal
 
   release:
     name: Create GitHub Release (tags)
