@@ -20,7 +20,25 @@ jobs:
       fail-fast: false
       matrix:
         configuration: [Debug, Release]
-        platform: [x64, x86, ARM64]
+        include:
+          - configuration: Debug
+            platform: x64
+            runtime_id: win-x64
+          - configuration: Debug
+            platform: x86
+            runtime_id: win-x86
+          - configuration: Debug
+            platform: ARM64
+            runtime_id: win-arm64
+          - configuration: Release
+            platform: x64
+            runtime_id: win-x64
+          - configuration: Release
+            platform: x86
+            runtime_id: win-x86
+          - configuration: Release
+            platform: ARM64
+            runtime_id: win-arm64
     
     steps:
     - name: Checkout code
@@ -32,14 +50,14 @@ jobs:
         dotnet-version: ${{ env.DOTNET_VERSION }}
     
     - name: Restore dependencies
-      run: dotnet restore ${{ env.SOLUTION_FILE }}
+      run: dotnet restore LottieConverter.csproj
     
-    - name: Build solution
-      run: dotnet build ${{ env.SOLUTION_FILE }} --configuration ${{ matrix.configuration }} --platform ${{ matrix.platform }} --no-restore -v minimal
+    - name: Build project
+      run: dotnet build LottieConverter.csproj --configuration ${{ matrix.configuration }} /p:Platform=${{ matrix.platform }} --no-restore -v minimal
     
     - name: Publish application
       if: matrix.configuration == 'Release'
-      run: dotnet publish LottieConverter.csproj --configuration ${{ matrix.configuration }} --platform ${{ matrix.platform }} --runtime win-${{ matrix.platform }} --self-contained false -v minimal
+      run: dotnet publish LottieConverter.csproj --configuration ${{ matrix.configuration }} /p:Platform=${{ matrix.platform }} --runtime ${{ matrix.runtime_id }} --self-contained false -v minimal
     
     - name: Upload build artifacts
       if: matrix.configuration == 'Release'
@@ -47,7 +65,7 @@ jobs:
       with:
         name: LottieConverter-${{ matrix.configuration }}-${{ matrix.platform }}
         path: |
-          bin/${{ matrix.platform }}/${{ matrix.configuration }}/net8.0-windows10.0.19041.0/win-${{ matrix.platform }}/
+          bin/${{ matrix.platform }}/${{ matrix.configuration }}/net8.0-windows10.0.19041.0/${{ matrix.runtime_id }}/
           !**/ref/
           !**/refint/
         retention-days: 30
