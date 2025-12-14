@@ -14,22 +14,33 @@ env:
 jobs:
   tag:
     name: Create tag from app version
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      created: ${{ steps.tag.outputs.created }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Read version from Package.appxmanifest
-        id: version
+      - name: Determine and (maybe) push tag
+        id: tag
         shell: bash
         run: |
           set -euo pipefail
-          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+
+          git fetch --tags --force
+
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+            echo "created=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          readarray -t ver_and_tag < <(python3 - <<'PY'
           import xml.etree.ElementTree as ET
 
           path = "Package.appxmanifest"
@@ -51,32 +62,40 @@ jobs:
           if not version:
               raise SystemExit("Package.appxmanifest <Identity> has no Version attribute")
 
-          tag = f"v{version}"
-          print(f"version={version}")
-          print(f"tag={tag}")
+          print(version)
+          print(f"v{version}")
           PY
+          )
+          version="${ver_and_tag[0]}"
+          tag="${ver_and_tag[1]}"
 
-      - name: Create and push tag (if missing)
-        env:
-          TAG: ${{ steps.version.outputs.tag }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          git fetch --tags --force
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
-          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
-            echo "Tag already exists: $TAG"
-            exit 0
+          created=false
+          should_create=false
+          if [[ "${GITHUB_REF}" == "refs/heads/main" || "${GITHUB_REF}" == "refs/heads/master" ]]; then
+            if [[ "${GITHUB_EVENT_NAME}" == "push" || "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+              should_create=true
+            fi
           fi
 
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag "$TAG"
-          git push origin "$TAG"
+          if [[ "$should_create" == "true" ]]; then
+            if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+              echo "Tag already exists: $tag"
+            else
+              git config user.name "github-actions[bot]"
+              git config user.email "github-actions[bot]@users.noreply.github.com"
+              git tag "$tag"
+              git push origin "$tag"
+              created=true
+            fi
+          fi
+
+          echo "created=$created" >> "$GITHUB_OUTPUT"
 
   build:
     name: Build (Release, ${{ matrix.platform }})
-    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && (startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || github.ref == 'refs/heads/develop'))
     runs-on: windows-2022
     
     strategy:
@@ -109,7 +128,7 @@ jobs:
       run: dotnet restore LottieConverter.csproj -r ${{ matrix.runtime_id }} /p:Platform=${{ matrix.platform }} /p:PublishProfile= /p:PublishReadyToRun=false /p:PublishTrimmed=false
     
     - name: Generate signing certificate (CI)
-      if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+      if: github.event_name != 'pull_request' && (startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || github.event_name == 'workflow_dispatch')
       shell: pwsh
       run: |
         $password = [System.Guid]::NewGuid().ToString("N")
@@ -133,7 +152,7 @@ jobs:
         Export-Certificate -Cert $cert -FilePath "msix-signing.cer" | Out-Null
 
     - name: Build MSIX installer
-      if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+      if: github.event_name != 'pull_request' && (startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || github.event_name == 'workflow_dispatch')
       shell: pwsh
       run: |
         New-Item -ItemType Directory -Force -Path "artifacts/${{ matrix.runtime_id }}" | Out-Null
@@ -159,7 +178,7 @@ jobs:
         Copy-Item -Force "msix-signing.cer" "artifacts/${{ matrix.runtime_id }}/msix-signing.cer"
 
     - name: Upload build artifacts
-      if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+      if: github.event_name != 'pull_request' && (startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || github.event_name == 'workflow_dispatch')
       uses: actions/upload-artifact@v4
       with:
         name: LottieConverter-Release-${{ matrix.platform }}
@@ -176,8 +195,8 @@ jobs:
 
   release:
     name: Create GitHub Release (tags)
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: [ build ]
+    if: startsWith(github.ref, 'refs/tags/v') || needs.tag.outputs.created == 'true'
+    needs: [ tag, build ]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -191,6 +210,8 @@ jobs:
       - name: Create GitHub Release and upload assets
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ needs.tag.outputs.tag }}
+          name: ${{ needs.tag.outputs.tag }}
           files: |
             **/*.msix*
             **/*.appinstaller
