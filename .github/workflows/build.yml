@@ -1,0 +1,55 @@
+name: Build
+
+on:
+  push:
+    branches: [ main, master, develop ]
+  pull_request:
+    branches: [ main, master, develop ]
+  workflow_dispatch:
+
+env:
+  DOTNET_VERSION: '8.0.x'
+  SOLUTION_FILE: 'LottieConverter.sln'
+
+jobs:
+  build:
+    name: Build (${{ matrix.configuration }}, ${{ matrix.platform }})
+    runs-on: windows-latest
+    
+    strategy:
+      fail-fast: false
+      matrix:
+        configuration: [Debug, Release]
+        platform: [x64, x86, ARM64]
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: ${{ env.DOTNET_VERSION }}
+    
+    - name: Restore dependencies
+      run: dotnet restore ${{ env.SOLUTION_FILE }}
+    
+    - name: Build solution
+      run: dotnet build ${{ env.SOLUTION_FILE }} --configuration ${{ matrix.configuration }} --platform ${{ matrix.platform }} --no-restore -v minimal
+    
+    - name: Publish application
+      if: matrix.configuration == 'Release'
+      run: dotnet publish LottieConverter.csproj --configuration ${{ matrix.configuration }} --platform ${{ matrix.platform }} --runtime win-${{ matrix.platform }} --self-contained false -v minimal
+    
+    - name: Upload build artifacts
+      if: matrix.configuration == 'Release'
+      uses: actions/upload-artifact@v4
+      with:
+        name: LottieConverter-${{ matrix.configuration }}-${{ matrix.platform }}
+        path: |
+          bin/${{ matrix.platform }}/${{ matrix.configuration }}/net8.0-windows10.0.19041.0/win-${{ matrix.platform }}/
+          !**/ref/
+          !**/refint/
+        retention-days: 30
+        if-no-files-found: warn
+

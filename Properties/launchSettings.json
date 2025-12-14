@@ -1,0 +1,10 @@
+{
+  "profiles": {
+    "LottieConverter (Package)": {
+      "commandName": "MsixPackage"
+    },
+    "LottieConverter (Unpackaged)": {
+      "commandName": "Project"
+    }
+  }
+}
